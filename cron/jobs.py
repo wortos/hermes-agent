@@ -2145,6 +2145,31 @@ def _normalize_reasoning_effort(value: Any) -> Optional[str]:
     return text
 
 
+def _normalize_job_max_turns(value: Any) -> Optional[int]:
+    """Validate a CLI-owned per-job agent iteration ceiling.
+
+    ``None``, an empty string, ``default``, or ``inherit`` clears the pin and
+    restores global config resolution. A stored ceiling is always a positive
+    integer, so malformed hand edits can be rejected fail-closed at fire time.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("max_turns must be a positive integer or 'default'")
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"", "default", "inherit"}:
+            return None
+        value = text
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("max_turns must be a positive integer or 'default'") from exc
+    if normalized < 1:
+        raise ValueError("max_turns must be at least 1")
+    return normalized
+
+
 def _compute_provider_model_snapshots(
     *,
     provider: Any,
@@ -2248,6 +2273,7 @@ def create_job(
     monitor_script: Optional[str] = None,
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
+    max_turns: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -2315,6 +2341,10 @@ def create_job(
                 exactly like config-set effort. Inert with ``no_agent=True``
                 (no LLM call to configure). None/empty = unset (job follows
                 config resolution, pre-existing behavior).
+        max_turns: Optional positive per-job agent iteration ceiling. When
+                set, it wins over global ``agent.max_turns`` at fire time.
+                None means the job follows global config. Inert with
+                ``no_agent=True``.
 
     Returns:
         The created job dict
@@ -2350,6 +2380,7 @@ def create_job(
     normalized_no_agent = bool(no_agent)
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
     normalized_reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
+    normalized_max_turns = _normalize_job_max_turns(max_turns)
     normalized_monitor_script = str(monitor_script).strip() if isinstance(monitor_script, str) else None
     normalized_monitor_script = normalized_monitor_script or None
     normalized_monitor_url = str(monitor_url).strip() if isinstance(monitor_url, str) else None
@@ -2466,6 +2497,8 @@ def create_job(
     # absent key = job follows config resolution (pre-feature behavior).
     if normalized_reasoning_effort is not None:
         job["reasoning_effort"] = normalized_reasoning_effort
+    if normalized_max_turns is not None:
+        job["max_turns"] = normalized_max_turns
 
     with _jobs_lock():
         jobs = load_jobs()
@@ -2580,6 +2613,9 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 updates["reasoning_effort"] = _normalize_reasoning_effort(
                     updates["reasoning_effort"]
                 )
+
+            if "max_turns" in updates:
+                updates["max_turns"] = _normalize_job_max_turns(updates["max_turns"])
 
             # Normalize repeat the same way create_job does. Callers pass
             # either the stored dict shape ({"times": N, "completed": M}) or

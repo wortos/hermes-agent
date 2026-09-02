@@ -673,6 +673,34 @@ def _resolve_job_reasoning_config(job: dict, cfg: dict, model: str) -> dict | No
     return resolve_reasoning_config(cfg if isinstance(cfg, dict) else {}, str(model))
 
 
+def _resolve_job_max_iterations(job: dict, cfg: dict) -> int:
+    """Resolve the run ceiling with a fail-closed per-job override."""
+    from cron.jobs import _normalize_job_max_turns
+    from hermes_cli.config import resolve_turn_limit
+
+    if job.get("max_turns") is not None:
+        try:
+            pinned = _normalize_job_max_turns(job["max_turns"])
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Cron job {job.get('id', '?')!r} has invalid max_turns; "
+                "refusing to start an unbounded agent run"
+            ) from exc
+        if pinned is None:
+            raise RuntimeError(
+                f"Cron job {job.get('id', '?')!r} has an empty max_turns pin; "
+                "refusing to start an unbounded agent run"
+            )
+        return pinned
+
+    cfg = cfg if isinstance(cfg, dict) else {}
+    agent_cfg = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
+    configured = agent_cfg.get("max_turns")
+    if configured is None:
+        configured = cfg.get("max_turns")
+    return resolve_turn_limit(configured)
+
+
 # Valid delivery platforms — used to validate user-supplied platform names
 # in cron delivery targets, preventing env var enumeration via crafted names.
 _KNOWN_DELIVERY_PLATFORMS = frozenset({
@@ -6053,14 +6081,10 @@ def run_job(
                     logger.warning("Job '%s': failed to parse prefill messages file '%s': %s", job_id, pfpath, e)
                     prefill_messages = None
 
-        # Max iterations — resolved through resolve_turn_limit() so that
-        # agent.max_turns: none / unlimited → sys.maxsize sentinel, and
-        # explicit 0 / null / "none" are honored instead of skipped by `or`.
-        from hermes_cli.config import resolve_turn_limit as _resolve_turn_limit
-        _mt = _cfg.get("agent", {}).get("max_turns")
-        if _mt is None:
-            _mt = _cfg.get("max_turns")
-        max_iterations = _resolve_turn_limit(_mt)
+        # Per-job ceiling wins over global config. Invalid hand-edited pins
+        # fail closed before AIAgent construction rather than falling through
+        # to an unlimited run.
+        max_iterations = _resolve_job_max_iterations(job, _cfg)
 
         # Provider routing
         pr = _cfg.get("provider_routing") or {}
