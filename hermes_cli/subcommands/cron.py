@@ -44,6 +44,10 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
             "With --no-agent: the script IS the job and its stdout is "
             "delivered verbatim. .sh/.bash files run via bash, everything "
             "else via Python.")
+    cron_create.add_argument("--completion-script", dest="completion_script",
+        help="Deterministic post-agent contract guard under ~/.hermes/scripts/. "
+            "Runs after every returned agent loop, including a hard turn-limit "
+            "exit; a non-zero exit fails the cron run.")
     _flag(cron_create, "--no-agent", dest="no_agent", default=False,
         help="Skip the LLM entirely — run --script on schedule and deliver "
             "its stdout directly. Empty stdout = silent. Classic watchdog "
@@ -74,6 +78,10 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
             "medium, high, xhigh, max, or ultra. Overrides agent.reasoning_effort "
             "and agent.reasoning_overrides for this job; unsupported levels are "
             "clamped by the provider at request time. Omit to follow config.")
+    cron_create.add_argument("--max-turns", dest="max_turns",
+        help="Positive hard per-run API-iteration ceiling. Every tool turn "
+            "consumes an iteration, so tool turns cannot exceed this value. "
+            "Use 'default' to follow global agent.max_turns.")
     cron_create.add_argument(
         "--continuity", dest="continuity", action="store_const", const=True, default=None,
         help="Each run wakes up with the job's own previous output injected "
@@ -106,6 +114,9 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         help="Path to a script under ~/.hermes/scripts/. Pass empty string to clear. "
             "With --no-agent the script IS the job; otherwise its stdout is "
             "injected into the agent's prompt each run.")
+    cron_edit.add_argument("--completion-script", dest="completion_script",
+        help="Set/replace the deterministic post-agent contract guard under "
+            "~/.hermes/scripts/. Pass empty string to clear.")
     cron_edit.add_argument(
         "--no-agent", dest="no_agent", action="store_const", const=True, default=None,
         help="Enable no-agent mode on this job (requires --script or an "
@@ -136,6 +147,9 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         help="Pin this job's reasoning (thinking) effort: none, minimal, low, "
             "medium, high, xhigh, max, or ultra. Pass empty string to clear "
             "the pin and follow config resolution.")
+    cron_edit.add_argument("--max-turns", dest="max_turns",
+        help="Set a positive hard per-run API-iteration ceiling. Use 'default' "
+            "to clear the pin and follow global agent.max_turns.")
 
     # lifecycle actions
     cron_pause = cron_subparsers.add_parser("pause", help="Pause a scheduled job")

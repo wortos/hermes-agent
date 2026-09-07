@@ -1573,6 +1573,31 @@ def _normalize_reasoning_effort(value: Any) -> Optional[str]:
     return text
 
 
+def _normalize_job_max_turns(value: Any) -> Optional[int]:
+    """Validate a CLI-owned per-job agent iteration ceiling.
+
+    ``None``, an empty string, ``default``, or ``inherit`` clears the pin and
+    restores global config resolution. A stored ceiling is always a positive
+    integer, so malformed hand edits can be rejected fail-closed at fire time.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("max_turns must be a positive integer or 'default'")
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"", "default", "inherit"}:
+            return None
+        value = text
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("max_turns must be a positive integer or 'default'") from exc
+    if normalized < 1:
+        raise ValueError("max_turns must be at least 1")
+    return normalized
+
+
 # Normalizers for create_job (all fields) / update_job (present fields). Invalid values raise BEFORE
 # storing.
 _CREATE_FIELD_NORMALIZERS: Dict[str, Callable[[Any], Any]] = {
@@ -1580,6 +1605,7 @@ _CREATE_FIELD_NORMALIZERS: Dict[str, Callable[[Any], Any]] = {
     "provider": _normalize_job_optional_text,
     "base_url": _normalize_base_url,
     "script": _normalize_job_optional_text,
+    "completion_script": _normalize_job_optional_text,
     "monitor_script": _normalize_job_optional_text,
     "monitor_url": _normalize_job_optional_text,
     "enabled_toolsets": lambda v: _normalize_str_list(v) if v else None,
@@ -1587,12 +1613,15 @@ _CREATE_FIELD_NORMALIZERS: Dict[str, Callable[[Any], Any]] = {
     "no_agent": bool,
     "context_from": _normalize_context_from,
     "failure_deliver": _normalize_failure_deliver,
+    "max_turns": _normalize_job_max_turns,
 }
 _UPDATE_FIELD_NORMALIZERS: Dict[str, Callable[[Any], Any]] = {
     "workdir": lambda v: None if v in {None, "", False} else _normalize_workdir(v),
     "monitor_script": _normalize_job_optional_text,
     "monitor_url": _normalize_job_optional_text,
+    "completion_script": _normalize_job_optional_text,
     "reasoning_effort": _normalize_reasoning_effort,
+    "max_turns": _normalize_job_max_turns,
 }
 
 
@@ -1694,6 +1723,7 @@ def create_job(
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
     script: Optional[str] = None,
+    completion_script: Optional[str] = None,
     context_from: Optional[Union[str, List[str]]] = None,
     enabled_toolsets: Optional[List[str]] = None,
     workdir: Optional[str] = None,
@@ -1703,6 +1733,7 @@ def create_job(
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     failure_deliver: Optional[str] = None,
+    max_turns: Optional[int] = None,
     paused: bool = False,
     paused_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -1710,7 +1741,8 @@ def create_job(
 
     deliver defaults to "origin" when ``origin`` is given, else "local"; repeat None = forever.
     script: stdout is injected as prompt context, or with ``no_agent=True`` IS the job (stdout
-    delivered verbatim, requires ``script``). context_from: job id(s) whose latest output is
+    delivered verbatim, requires ``script``). completion_script: deterministic post-agent contract
+    guard run after every completed agent loop; failure fails the cron run. context_from: job id(s) whose latest output is
     injected. workdir: absolute cwd for tools/scripts. monitor_script/monitor_url: cheap monitor
     source run FIRST each tick; unchanged output suppresses the agent run (mutually exclusive,
     incompatible with ``no_agent``). reasoning_effort: per-job pin; capability NOT validated."""
@@ -1769,6 +1801,7 @@ def create_job(
         "model_snapshot": model_snapshot,
         "base_url": f["base_url"],
         "script": f["script"],
+        "completion_script": f["completion_script"],
         "no_agent": f["no_agent"],
         "monitor_script": f["monitor_script"],
         "monitor_url": f["monitor_url"],
@@ -1793,6 +1826,7 @@ def create_job(
         "deliver": deliver,
         "origin": origin,  # Tracks where job was created for "origin" delivery
         "enabled_toolsets": f["enabled_toolsets"],
+        "max_turns": f["max_turns"],
         "workdir": f["workdir"],
     }
     # Optional keys are persisted only when explicitly set: an absent key falls back to global

@@ -479,6 +479,43 @@ def _resolve_job_reasoning_config(job: dict, cfg: dict, model: str) -> dict | No
     return resolve_reasoning_config(cfg if isinstance(cfg, dict) else {}, str(model))
 
 
+def _resolve_job_max_iterations(job: dict, cfg: dict) -> int:
+    """Resolve the hard run ceiling, with a fail-closed per-job override.
+
+    ``AIAgent.max_iterations`` counts provider API-loop iterations. Every
+    tool-bearing assistant turn consumes one such iteration, so this ceiling
+    is also a hard upper bound on tool turns even when transcript compaction
+    later changes the diagnostic ``tool_turns`` count.
+    """
+    from cron.jobs import _normalize_job_max_turns
+    from hermes_cli.config import resolve_turn_limit
+
+    if job.get("max_turns") is not None:
+        try:
+            pinned = _normalize_job_max_turns(job["max_turns"])
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Cron job {job.get('id', '?')!r} has invalid max_turns; "
+                "refusing to start an unbounded agent run"
+            ) from exc
+        if pinned is None:
+            raise RuntimeError(
+                f"Cron job {job.get('id', '?')!r} has an empty max_turns pin; "
+                "refusing to start an unbounded agent run"
+            )
+        logger.info(
+            "Job '%s': applying hard per-job iteration ceiling %d",
+            job.get("id", "?"), pinned)
+        return pinned
+
+    cfg = cfg if isinstance(cfg, dict) else {}
+    agent_cfg = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
+    configured = agent_cfg.get("max_turns")
+    if configured is None:
+        configured = cfg.get("max_turns")
+    return resolve_turn_limit(configured)
+
+
 from cron.jobs import (
     _ensure_cron_dir, advance_next_runs, claim_dispatch, claim_job_for_fire, fire_claim_fence,
     clear_run_claim, get_due_jobs, heartbeat_fire_claim, heartbeat_run_claim, mark_job_run,
@@ -1910,6 +1947,35 @@ def _final_response_from_result(result: dict, job_id: str, job_name: str, AIAgen
     return final_response
 
 
+def _run_completion_script(
+    job: dict, result: dict, *, workdir: Optional[str], cancel_event: Optional[_CancelEventLike],
+) -> str:
+    """Run a deterministic post-agent contract guard and return its redacted output.
+
+    The hook runs after every normally returned agent loop, including a hard
+    ``max_iterations`` exit, and before the cron run is marked successful. A
+    configured hook failure therefore fails the run instead of silently
+    accepting a missing durable handoff.
+    """
+    script_path = str(job.get("completion_script") or "").strip()
+    if not script_path:
+        return ""
+    ok, output = _run_job_script_with_claim_heartbeat(
+        job, script_path, workdir=workdir, cancel_event=cancel_event)
+    result["completion_script"] = {
+        "path": script_path,
+        "success": ok,
+        "output": output,
+    }
+    logger.info(
+        "Job '%s': completion script %s after %s API iteration(s): %s",
+        job.get("id", "?"), "succeeded" if ok else "failed",
+        result.get("api_calls", "?"), output or "(no output)")
+    if not ok:
+        raise RuntimeError(f"completion script failed: {output}")
+    return output
+
+
 def _finalize_cron_session(session_db, agent, job_id: str, job_name: str, cron_session_id: str) -> None:
     """Title, classify, end and release the cron session after the agent turn has returned."""
     # Bound every DB op so storage failure cannot hold the dispatch guard.
@@ -2208,12 +2274,10 @@ def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _Cro
     setup = _CronAgentSetup(model=jc.model)
     setup.prefill_messages = _load_prefill_messages(_cfg, job_id)
 
-    # resolve_turn_limit() honors none/unlimited (sys.maxsize) and explicit 0 / null.
-    from hermes_cli.config import resolve_turn_limit as _resolve_turn_limit
-    _mt = _cfg.get("agent", {}).get("max_turns")
-    if _mt is None:
-        _mt = _cfg.get("max_turns")
-    setup.max_iterations = _resolve_turn_limit(_mt)
+    # Per-job ceiling wins over global config. Invalid hand-edited pins fail
+    # closed before AIAgent construction rather than falling through to an
+    # unlimited run.
+    setup.max_iterations = _resolve_job_max_iterations(job, _cfg)
 
     # Runtime backstop (CWE-200/522): fail closed BEFORE resolution on a provider/base_url pair
     # that would ship a stored credential off-host; hand-written jobs bypass create-time checks.
@@ -2290,6 +2354,9 @@ class _FireAudit:
             "prompt_tokens": result.get("prompt_tokens"),
             "completion_tokens": result.get("completion_tokens"),
             "total_tokens": result.get("total_tokens"),
+            "api_calls": result.get("api_calls"),
+            "turn_exit_reason": result.get("turn_exit_reason"),
+            "completion_script": result.get("completion_script"),
             "response_silent": bool(result.get("response_silent")),
             "deliver_target": self.job.get("deliver"),
             "model": self.model or None,
@@ -2359,10 +2426,15 @@ def run_job(
         result = _run_agent_with_watchdog(
             agent, prompt, job, job_id, job_name, scope.task_id, cancel_event,
             worker_state=_worker_state)
+        completion_output = _run_completion_script(
+            job, result, workdir=scope.workdir, cancel_event=cancel_event)
         final_response = _final_response_from_result(result, job_id, job_name, AIAgent)
         # Keep final_response clean for delivery logic (empty = no delivery).
         logged_response = final_response if final_response else "(No response generated)"
-        output = _run_doc_header(job, job_name, job_id, prompt) + f"## Response\n\n{logged_response}\n"
+        output = _run_doc_header(job, job_name, job_id, prompt)
+        if completion_output:
+            output += f"## Completion script\n\n{completion_output}\n\n"
+        output += f"## Response\n\n{logged_response}\n"
         logger.info("Job '%s' completed successfully", job_name)
         _audit.write(dict(result, response_silent=_is_cron_silence_response(final_response or "")), None)
         return True, output, final_response, None

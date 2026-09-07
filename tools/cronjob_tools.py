@@ -541,6 +541,7 @@ def _action_create(a: Dict[str, Any]) -> str:
     error = (
         (prompt and _scan_cron_prompt(prompt))
         or (script and _validate_cron_script_path(script))
+        or (a["completion_script"] and _validate_cron_script_path(a["completion_script"]))
         or (a["monitor_script"] and _validate_cron_script_path(a["monitor_script"]))
         # A model-supplied base_url must not route a named provider's stored credential
         # to an attacker endpoint.
@@ -566,12 +567,14 @@ def _action_create(a: Dict[str, Any]) -> str:
             model=_normalize_optional_job_value(a["model"]), provider=_normalize_optional_job_value(a["provider"]),
             base_url=_normalize_optional_job_value(a["base_url"], strip_trailing_slash=True),
             script=_normalize_optional_job_value(script), context_from=context_from,
+            completion_script=_normalize_optional_job_value(a["completion_script"]),
             enabled_toolsets=a["enabled_toolsets"] or None, workdir=_normalize_optional_job_value(a["workdir"]),
             no_agent=_no_agent, attach_to_session=a["attach_to_session"],
             monitor_script=_normalize_optional_job_value(a["monitor_script"]),
             monitor_url=_normalize_optional_job_value(a["monitor_url"]),
             # CLI-only lane: absent from CRONJOB_SCHEMA and the model dispatch (models don't pick models).
             reasoning_effort=a["reasoning_effort"],
+            max_turns=a["max_turns"],
             failure_deliver=_resolve_cron_context_deliver(_normalize_deliver_param(a["failure_deliver"])),
             **({"paused": a["paused"], "paused_reason": a["paused_reason"]}
                if a["paused"] is not False or a["paused_reason"] is not None else {}))
@@ -724,6 +727,9 @@ def _update_core_fields(job: Dict[str, Any], a: Dict[str, Any], updates: Dict[st
     if a["reasoning_effort"] is not None:
         # CLI-only lane; update_job validates, empty string clears the pin.
         updates["reasoning_effort"] = a["reasoning_effort"]
+    if a["max_turns"] is not None:
+        # CLI-only lane. update_job validates and normalizes; default/inherit clears.
+        updates["max_turns"] = a["max_turns"]
     # Re-validate the EFFECTIVE provider/base_url on EVERY update: a job persisted before
     # this guard may hold an unsafe pair, and editing an unrelated field must not leave it
     # schedulable. Merging this update over the stored job lets an operator remediate.
@@ -731,9 +737,13 @@ def _update_core_fields(job: Dict[str, Any], a: Dict[str, Any], updates: Dict[st
 
 
 def _update_script_fields(job: Dict[str, Any], a: Dict[str, Any], updates: Dict[str, Any]) -> Optional[str]:
-    """script / monitor_script / monitor_url (empty string clears); returns an error string or None."""
+    """Script fields (empty string clears); returns an error string or None."""
     monitor_script, monitor_url = a["monitor_script"], a["monitor_url"]
-    for field, value in (("script", a["script"]), ("monitor_script", monitor_script)):
+    for field, value in (
+        ("script", a["script"]),
+        ("completion_script", a["completion_script"]),
+        ("monitor_script", monitor_script),
+    ):
         if value is not None:
             if value:
                 path_error = _validate_cron_script_path(value)
@@ -865,6 +875,7 @@ def cronjob(
     base_url: Optional[str] = None,
     reason: Optional[str] = None,
     script: Optional[str] = None,
+    completion_script: Optional[str] = None,
     context_from: Optional[Union[str, List[str]]] = None,
     continuity: Optional[bool] = None,
     enabled_toolsets: Optional[List[str]] = None,
@@ -874,6 +885,7 @@ def cronjob(
     monitor_script: Optional[str] = None,
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
+    max_turns: Optional[int] = None,
     failure_deliver: Optional[Union[str, List[str]]] = None,
     task_id: str = None,
     session_id: Optional[str] = None,
