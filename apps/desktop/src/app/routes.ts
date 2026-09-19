@@ -1,8 +1,9 @@
-import { atom } from 'nanostores'
+import { atom, onMount } from 'nanostores'
 import type { ReactNode } from 'react'
 
 import { noteActiveTreeGroup, revealTreePane } from '@/components/pane-shell/tree/store'
 import { registry } from '@/contrib/registry'
+import type { Contribution } from '@/contrib/types'
 
 type NavigateLike = (to: string, options?: { replace?: boolean }) => void
 
@@ -91,9 +92,20 @@ export interface RouteContribution {
   path: string
 }
 
-export function contributedRoutes(): Array<{ key: string; path: string; title?: string; render: () => ReactNode }> {
-  return registry
-    .getArea(ROUTES_AREA)
+/** Bumps whenever the `routes` area mutates. For non-React consumers that
+ *  derive from `contributedRoutes()` outside a render (paneMirror titles):
+ *  hand it to `also` so a plugin route registering after its tile opened
+ *  re-syncs the tab title. Subscribes to the registry only while listened to. */
+export const $routesVersion = atom(0)
+onMount($routesVersion, () => registry.subscribeArea(ROUTES_AREA, () => $routesVersion.set($routesVersion.get() + 1)))
+
+// React consumers must pass their `useContributions(ROUTES_AREA)` snapshot in:
+// with React Compiler enabled, an independently-called `contributedRoutes()`
+// can stay memoized across a late registration the subscription DID deliver.
+export function contributedRoutes(
+  contributions: readonly Contribution[] = registry.getArea(ROUTES_AREA)
+): Array<{ key: string; path: string; title?: string; render: () => ReactNode }> {
+  return contributions
     .map(c => ({
       key: `${c.source ?? 'core'}:${c.id}`,
       path: (c.data as RouteContribution | undefined)?.path ?? '',
@@ -139,6 +151,16 @@ export const OVERLAY_VIEWS: ReadonlySet<AppView> = new Set([
 
 export function isOverlayView(view: AppView): boolean {
   return OVERLAY_VIEWS.has(view)
+}
+
+/** True when TitlebarControls may hide the app's fixed tool clusters.
+ *  Overlays already own the window (clusters AND titleBar slots unmount).
+ *  Contributed full pages (`extension`) hide the app clusters only while the
+ *  page actually mounts `titleBar.*` chrome — those slots are mount-scoped, so
+ *  a plugin page with no titlebar contribution keeps the app controls.
+ *  First-party workspace pages (skills/messaging/artifacts) keep the clusters. */
+export function hidesFixedTitlebarClusters(view: AppView): boolean {
+  return isOverlayView(view) || view === 'extension'
 }
 
 /** The pathname of a router target. Every classifier below reasons about a
@@ -207,7 +229,7 @@ export function appViewForPath(pathname: string): AppView {
 /** Does `to` land on a full page rendered INSIDE the workspace pane
  *  (skills/messaging/artifacts/contributed routes)? Overlays don't count —
  *  they float over whatever the workspace is already showing. */
-function isWorkspacePageRoute(to: string): boolean {
+export function isWorkspacePageRoute(to: string): boolean {
   const view = appViewForPath(to)
 
   return view !== 'chat' && !isOverlayView(view)
@@ -219,6 +241,12 @@ function isWorkspacePageRoute(to: string): boolean {
  *  it as `headerVeto` so the zone tab bar stands down on pages. Overlays
  *  (settings/…) don't count — the chat stays beneath them. */
 export const $workspaceIsPage = atom(false)
+
+/** Page-owned controls (kanban's board switcher) projected into the workspace
+ *  panel's tab-header space while `$workspaceIsPage` holds — the page's title
+ *  row, not the native band. Distinct from `titleBar.*`, whose slots stay
+ *  mounted on every route so plugin components never remount on navigation. */
+export const WORKSPACE_PAGE_HEADER_AREA = 'workspace.pageHeader'
 
 function revealWorkspacePane(): void {
   noteActiveTreeGroup(null)
