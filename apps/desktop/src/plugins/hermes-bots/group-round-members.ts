@@ -3,7 +3,6 @@ import { recordGroupActivity } from './group-activity'
 import {
   $groupChats,
   appendGroupChatEntry,
-  GROUP_CHAT_HISTORY_LIMIT,
   GROUP_CHAT_MAX_CONTINUATIONS,
   GROUP_CHAT_MAX_MESSAGES,
   groupThreadOf,
@@ -11,8 +10,8 @@ import {
   updateGroupChat
 } from './group-chat'
 import type { GroupChatRoom } from './group-chat'
-import { groupMemberKey } from './group-membership'
-import { buildGroupChatTurnPrompt, formatGroupChatLine } from './group-round-prompt'
+import { groupMemberAuthor, groupMemberKey } from './group-membership'
+import { buildGroupChatTurnPrompt, formatGroupDeltaLines } from './group-round-prompt'
 import { isGroupPassText, runGroupChatMemberTurn } from './group-turns'
 import type { Attachment, GroupMember, GroupMessage } from './types'
 
@@ -94,7 +93,7 @@ function prepareGroupRoundMember(context: GroupRoundMemberContext, member: Group
     groupName: context.group,
     members,
     viewer: member,
-    deltaLines: delta.slice(-GROUP_CHAT_HISTORY_LIMIT).map((e: GroupMessage) => formatGroupChatLine(e, member, context.group))
+    deltaLines: formatGroupDeltaLines(delta, member, context.group)
   })
 
   // Images riding this delta (user attachments — member entries don't
@@ -234,15 +233,7 @@ export async function runGroupRoundMember(
   if (reply !== null && !isGroupPassText(reply)) {
     appendGroupChatEntry(
       context.group,
-      {
-        kind: 'member',
-        name: member.name,
-        ...(member.remoteSource
-          ? {
-              source: member.connectionLabel || member.connectionId
-            }
-          : {})
-      },
+      groupMemberAuthor(member),
       reply,
       thread
     )

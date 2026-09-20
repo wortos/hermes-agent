@@ -305,6 +305,11 @@ DEFAULT_CRASH_GRACE_SECONDS = 30
 # breaker must never trip on a throttle). 75 == BSD EX_TEMPFAIL.
 KANBAN_RATE_LIMIT_EXIT_CODE = 75
 
+# Worker exit "provider rejected the configuration": credential revoked (401/403), model gone
+# (404), TLS chain broken — a retry cannot fix it, so the dispatcher parks the card blocked on
+# the FIRST occurrence instead of spending ``failure_limit`` identical spawns. 78 == BSD EX_CONFIG.
+KANBAN_TERMINAL_PROVIDER_EXIT_CODE = 78
+
 
 def _resolve_crash_grace_seconds() -> int:
     """``HERMES_KANBAN_CRASH_GRACE_SECONDS`` (0 = immediate, for tests) else default."""
@@ -1502,6 +1507,7 @@ VALID_SORT_ORDERS: dict[str, str] = {
     "assignee": "assignee ASC, created_at ASC",
     "title": "title ASC, id ASC",
     "updated": "started_at DESC NULLS LAST, created_at DESC",
+    "completed-desc": "completed_at DESC NULLS LAST, id DESC",
 }
 
 

@@ -134,6 +134,73 @@ describe('routing', () => {
     expect(rounds.groupReplyMentionTag({ name: 'ops', title: 'The Ops' }, MEMBERS)).toBe('the-ops')
   })
 
+  it('resolves a pre-rename handle to the renamed member (#110200)', async () => {
+    const { rounds } = await loadRoom()
+
+    const members: GroupMember[] = [{ name: 'niezalezny', previous_names: ['niezale-ny'] }, { name: 'builder' }]
+
+    const parsed = rounds.parseGroupChatMentions('@niezale-ny please check', members)
+
+    expect(parsed.mentioned.has('niezalezny')).toBe(true)
+    expect(parsed.mentioned.size).toBe(1)
+  })
+
+  it('prefers a live name over another member\u2019s rename history', async () => {
+    const { rounds } = await loadRoom()
+
+    // Someone later claimed the old name as their own profile: the live name
+    // wins, the alias must not steal the mention.
+    const members: GroupMember[] = [{ name: 'niezalezny', previous_names: ['niezale-ny'] }, { name: 'niezale-ny' }]
+
+    const parsed = rounds.parseGroupChatMentions('@niezale-ny take this', members)
+
+    expect(parsed.mentioned.has('niezale-ny')).toBe(true)
+    expect(parsed.mentioned.size).toBe(1)
+  })
+
+  it('a previous-name alias cannot squat on a collapsed form of a live name', async () => {
+    const { rounds } = await loadRoom()
+
+    // Live member "bob.jones": the live loop registers "bob.jones" but NOT
+    // the collapsed "bobjones" (its hand-rolled collapse only strips [\s_-],
+    // never dots). The alias loop normalizes with mentionNameForms, which
+    // DOES yield "bobjones" — the old !handles.has guard missed it and let
+    // the alias hijack the mention. Every typed normalization must reach
+    // the live member.
+    const members: GroupMember[] = [{ name: 'bob.jones' }, { name: 'renamed', previous_names: ['bobjones'] }]
+
+    for (const typed of ['@bob.jones', '@bob-jones', '@bobjones']) {
+      const parsed = rounds.parseGroupChatMentions(`${typed} take this`, members)
+
+      expect(parsed.mentioned.has('bob.jones')).toBe(true)
+      expect(parsed.mentioned.size).toBe(1)
+    }
+  })
+
+  it('a previous-name alias cannot squat on the slug form of a dotted live name', async () => {
+    const { rounds } = await loadRoom()
+
+    const members: GroupMember[] = [{ name: 'ann.lee' }, { name: 'renamed', previous_names: ['ann-lee'] }]
+
+    const parsed = rounds.parseGroupChatMentions('@ann-lee take this', members)
+
+    expect(parsed.mentioned.has('ann.lee')).toBe(true)
+    expect(parsed.mentioned.size).toBe(1)
+  })
+
+  it('dotted previous names still resolve through every normalization when uncontested', async () => {
+    const { rounds } = await loadRoom()
+
+    const members: GroupMember[] = [{ name: 'renamed', previous_names: ['ann.lee'] }, { name: 'builder' }]
+
+    for (const typed of ['@ann.lee', '@ann-lee', '@annlee']) {
+      const parsed = rounds.parseGroupChatMentions(`${typed} take this`, members)
+
+      expect(parsed.mentioned.has('renamed')).toBe(true)
+      expect(parsed.mentioned.size).toBe(1)
+    }
+  })
+
   it('rotates the lead speaker each round', async () => {
     const { rounds } = await loadRoom()
 
@@ -166,6 +233,49 @@ describe('routing', () => {
 
     expect(lines.some(line => line.startsWith('research:'))).toBe(true)
     expect(lines.some(line => line.startsWith('builder: On it'))).toBe(true)
+  })
+
+  // #94863 D3: a LOCAL member's reply must carry from.source too, or the same
+  // entry mirrored to another Desktop reads as that Desktop's own same-named bot.
+  it('stamps a local member reply with its connection label and keeps (you) for that member only', async () => {
+    const room = await loadRoom({ turn: () => 'Central here.' })
+    const { formatGroupChatLine } = await import('./group-round-prompt')
+    const local: GroupMember = { connectionId: 'central', connectionLabel: 'Central', name: 'default', title: '' }
+
+    room.rounds.sendToGroupChat('Core', [local], '@hermes status?')
+    await settle(room, 'Core')
+
+    const reply = log(room, 'Core').find(entry => entry.from.kind === 'member')
+
+    expect(reply?.from).toEqual({ kind: 'member', name: 'default', source: 'Central' })
+    expect(formatGroupChatLine(reply as GroupMessage, local)).toContain('(you)')
+    // The same entry seen by the other machine's `default` is somebody else.
+    expect(
+      formatGroupChatLine(reply as GroupMessage, { connectionId: 'mbp', connectionLabel: 'MBP', name: 'default', remoteSource: true })
+    ).not.toContain('(you)')
+  })
+
+  // Two Desktops label the same gateway differently ("Central" here, "Studio"
+  // there): the reply's gateway install_id, not the label, decides `(you)`.
+  it('matches self on the gateway install_id when Desktops label the connection differently', async () => {
+    const room = await loadRoom({ turn: () => 'Central here.' })
+    const { formatGroupChatLine } = await import('./group-round-prompt')
+    const local: GroupMember = { connectionId: 'central', connectionLabel: 'Central', installId: 'gw-1', name: 'default', title: '' }
+
+    room.rounds.sendToGroupChat('Core', [local], '@hermes status?')
+    await settle(room, 'Core')
+
+    const reply = log(room, 'Core').find(entry => entry.from.kind === 'member') as GroupMessage
+
+    expect(reply.from).toEqual({ kind: 'member', name: 'default', source: 'Central', gateway: 'gw-1' })
+    // The other Desktop's view of the SAME gateway under its own label.
+    expect(
+      formatGroupChatLine(reply, { connectionId: 'c9', connectionLabel: 'Studio', installId: 'gw-1', name: 'default', remoteSource: true })
+    ).toContain('(you)')
+    // …and a different gateway that happens to share the label is not self.
+    expect(
+      formatGroupChatLine(reply, { connectionId: 'c2', connectionLabel: 'Central', installId: 'gw-2', name: 'default', remoteSource: true })
+    ).not.toContain('(you)')
   })
 })
 
@@ -391,6 +501,51 @@ describe('per-member delta', () => {
     expect(room.chat.$groupChats.get().Trim.watermarks[`${thread}::research`]).toBe(0)
     await room.rounds.runGroupChatRounds('Trim', members, thread)
     expect(room.gateway.calls.at(-1)?.prompt).toContain('unseen-99')
+  })
+
+  // #114341: the turn renders only the last GROUP_CHAT_HISTORY_LIMIT entries
+  // of the delta while the watermark advances past the whole tail, so the
+  // head is never delivered later either. The cut must be visible to the
+  // member (naming how many entries it did not see); a delta that fits
+  // carries no marker.
+  it('names the omitted head of an over-long delta in the turn prompt', async () => {
+    const room = await loadRoom({ turn: () => '(pass)' })
+    const members = [MEMBERS[0]]
+    const thread = room.rounds.sendToGroupChat('Head', members, 'seen-0')!
+    await settle(room, 'Head')
+    const limit = room.chat.GROUP_CHAT_HISTORY_LIMIT
+
+    for (let i = 1; i <= limit + 5; i++) {
+      room.chat.appendGroupChatEntry('Head', { kind: 'user', name: 'You' }, `unseen-${i}`, thread)
+    }
+
+    const seen = room.chat.$groupChats.get().Head.watermarks[`${thread}::research`] || 0
+    const omitted = log(room, 'Head').slice(seen).length - limit
+    expect(omitted).toBeGreaterThan(0)
+
+    await room.rounds.runGroupChatRounds('Head', members, thread)
+    const prompt = room.gateway.calls.at(-1)?.prompt || ''
+
+    expect(prompt).toMatch(new RegExp(`${omitted} earlier room messages omitted`))
+    expect(prompt).toContain(`unseen-${limit + 5}`)
+    expect(prompt).not.toContain(`unseen-${omitted}\n`)
+  })
+
+  it('adds no omission marker when the delta fits the window', async () => {
+    const room = await loadRoom({ turn: () => '(pass)' })
+    const members = [MEMBERS[0]]
+    const thread = room.rounds.sendToGroupChat('Fits', members, 'seen-0')!
+    await settle(room, 'Fits')
+
+    for (let i = 1; i < room.chat.GROUP_CHAT_HISTORY_LIMIT; i++) {
+      room.chat.appendGroupChatEntry('Fits', { kind: 'user', name: 'You' }, `unseen-${i}`, thread)
+    }
+
+    await room.rounds.runGroupChatRounds('Fits', members, thread)
+    const prompt = room.gateway.calls.at(-1)?.prompt || ''
+
+    expect(prompt).toContain('unseen-1')
+    expect(prompt).not.toMatch(/omitted/)
   })
 
   it('feeds a second send only the NEW messages', async () => {

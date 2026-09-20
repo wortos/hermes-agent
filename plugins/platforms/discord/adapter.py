@@ -1486,13 +1486,27 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                 return False, False
             ignore_no_mention = _scoped_gate_env("DISCORD_IGNORE_NO_MENTION", "true").lower() in {"true", "1", "yes"}
             if ignore_no_mention and not raw_self_mention and not other_bots_mentioned:
-                parent_id = None
-                if hasattr(message.channel, "parent_id") and message.channel.parent_id:
-                    parent_id = str(message.channel.parent_id)
-                free_channels = self._discord_free_response_channels()
-                channel_keys = self._discord_channel_keys(message, parent_id)
-                if "*" not in free_channels and not (channel_keys & free_channels):
-                    return False, False
+                # A thread the bot joined is not someone else's conversation, and the other two
+                # ingress paths already exempt it: _dispatch_recovered_message() and
+                # _handle_message(). Admission runs on both and can veto what they admit, so
+                # without this a third-party mention in a bot thread is dropped here even though
+                # the same message with no mention at all is admitted. ``thread_require_mention``
+                # still gates multi-bot threads, inside _in_bot_thread().
+                if not self._in_bot_thread(message):
+                    parent_id = None
+                    if hasattr(message.channel, "parent_id") and message.channel.parent_id:
+                        parent_id = str(message.channel.parent_id)
+                    free_channels = self._discord_free_response_channels()
+                    channel_keys = self._discord_channel_keys(message, parent_id)
+                    if "*" not in free_channels and not (channel_keys & free_channels):
+                        # Every other silent return in this function is at least guessable from
+                        # the outside; this one is not, and an operator seeing no log line cannot
+                        # tell it apart from the gateway never receiving the event.
+                        logger.debug(
+                            "[%s] admission: dropping message %s — mentions others, not self, "
+                            "not a bot thread, channel not free-response",
+                            self.name, getattr(message, "id", "?"))
+                        return False, False
         return True, role_authorized
 
     async def _dispatch_discord_message(self, message: Any) -> bool:
@@ -4741,6 +4755,12 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         """Return whether Discord channel messages require a bot mention."""
         return self._extra_or_env_flag("require_mention", "DISCORD_REQUIRE_MENTION", "true", truthy=False)
 
+    def _discord_free_response_auto_thread(self) -> bool:
+        """Free-response channels also auto-thread when opted in; default replies inline."""
+        return self._extra_or_env_flag(
+            "free_response_auto_thread", "DISCORD_FREE_RESPONSE_AUTO_THREAD", "false", truthy=True,
+        )
+
     def _discord_max_attachment_bytes(self) -> int:
         """Per-attachment byte cap; 0 = unlimited (whole attachment is held in memory). Default 32 MiB."""
         configured = self.config.extra.get("max_attachment_bytes")
@@ -5884,6 +5904,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         #   discord.allowed_channels: If set, bot ONLY responds in these channels (whitelist)
         #   discord.no_thread_channels: Channel IDs where bot responds directly without creating thread
         #   discord.auto_thread: Auto-create thread on @mention in channels (default: true)
+        #   discord.free_response_auto_thread: Free-response channels also auto-thread (default: false)
         thread_id = None
         parent_channel_id = None
         is_thread = isinstance(message.channel, discord.Thread)
@@ -5948,7 +5969,10 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         auto_threaded_channel = None
         if not is_thread and not isinstance(message.channel, discord.DMChannel):
             no_thread_channels = self._get_no_thread_channels()
-            skip_thread = bool(channel_keys & no_thread_channels) or is_free_channel
+            # Voice-linked and reply exclusions live in the auto-thread gate below, not in skip_thread.
+            skip_thread = bool(channel_keys & no_thread_channels) or (
+                is_free_channel and not self._discord_free_response_auto_thread()
+            )
             auto_thread = self._extra_or_env_flag("auto_thread", "DISCORD_AUTO_THREAD", "true", truthy=True)
             is_reply_message = getattr(message, "type", None) == discord.MessageType.reply
             if auto_thread and not skip_thread and not is_voice_linked_channel and not is_reply_message:
@@ -7228,7 +7252,11 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
         seeded_extra["approval_mentions"] = approval_mentions_cfg
         _env_default("DISCORD_APPROVAL_MENTIONS", str(approval_mentions_cfg).lower())
     _gate("free_response_channels", "DISCORD_FREE_RESPONSE_CHANNELS", from_platform_extra=False)
-    for key, env_key in (("auto_thread", "DISCORD_AUTO_THREAD"), ("reactions", "DISCORD_REACTIONS")):
+    for key, env_key in (
+        ("auto_thread", "DISCORD_AUTO_THREAD"),
+        ("free_response_auto_thread", "DISCORD_FREE_RESPONSE_AUTO_THREAD"),
+        ("reactions", "DISCORD_REACTIONS"),
+    ):
         if key in discord_cfg:
             seeded_extra[key] = discord_cfg[key]
             _env_default(env_key, str(discord_cfg[key]).lower())
@@ -7290,8 +7318,9 @@ def register(ctx) -> None:
         setup_fn=interactive_setup,
         # YAML→env bridge: ``discord:`` config keys → ``DISCORD_*`` env vars read via os.getenv().
         # YAML→env config bridge — owns the translation of ``config.yaml`` ``discord:`` keys
-        # (require_mention, free_response_channels, auto_thread, reactions, ignored_channels,
-        # allowed_channels, no_thread_channels, allow_mentions.*, reply_to_mode, thread_require_mention)
+        # (require_mention, free_response_channels, auto_thread, free_response_auto_thread,
+        # reactions, ignored_channels, allowed_channels, no_thread_channels, allow_mentions.*,
+        # reply_to_mode, thread_require_mention)
         # into ``DISCORD_*`` env vars that the adapter reads via ``os.getenv()``. Replaces the hardcoded
         # block that used to live in ``gateway/config.py``. Hook contract: #24836.
         apply_yaml_config_fn=_apply_yaml_config,
