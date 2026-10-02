@@ -18,7 +18,7 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
     cron_subparsers = cron_parser.add_subparsers(dest="cron_command")
 
     cron_list = cron_subparsers.add_parser("list", help="List scheduled jobs")
-    _flag(cron_list, "--all", help="Include disabled jobs")
+    _flag(cron_list, "--all", help="Include disabled and completed jobs")
 
     cron_create = cron_subparsers.add_parser(
         "create", aliases=["add"], help="Create a scheduled job")
@@ -85,6 +85,10 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
         help="Positive hard per-run API-iteration ceiling. Every tool turn "
             "consumes an iteration, so tool turns cannot exceed this value. "
             "Use 'default' to follow global agent.max_turns.")
+    cron_create.add_argument("--interpreter",
+        help="Absolute or ~ path to a Python in your own venv (e.g. ~/venvs/report/bin/python) "
+            "for a .py --script / --monitor-script, so it can import packages Hermes does not "
+            "ship. .sh/.bash still run under bash. Omit to use Hermes' Python.")
     cron_create.add_argument(
         "--continuity", dest="continuity", action="store_const", const=True, default=None,
         help="Each run wakes up with the job's own previous output injected "
@@ -158,6 +162,9 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
     cron_edit.add_argument("--max-turns", dest="max_turns",
         help="Set a positive hard per-run API-iteration ceiling. Use 'default' "
             "to clear the pin and follow global agent.max_turns.")
+    cron_edit.add_argument("--interpreter",
+        help="Absolute or ~ path to a Python for a .py script / monitor script. "
+            "Pass empty string to clear (back to Hermes' Python).")
 
     # lifecycle actions
     cron_pause = cron_subparsers.add_parser("pause", help="Pause a scheduled job")
